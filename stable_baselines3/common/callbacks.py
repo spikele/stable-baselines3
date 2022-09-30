@@ -2,13 +2,14 @@ import os
 import warnings
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Union
+import rospy
 
 import gym
 import numpy as np
 
 from stable_baselines3.common import base_class  # pytype: disable=pyi-error
 from stable_baselines3.common.evaluation import evaluate_policy
-from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, sync_envs_normalization
+from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, sync_envs_normalization, VecNormalize
 
 
 class BaseCallback(ABC):
@@ -318,6 +319,7 @@ class EvalCallback(EventCallback):
       To account for that, you can use ``eval_freq = max(eval_freq // n_envs, 1)``
 
     :param eval_env: The environment used for initialization
+    :param train_env: The environment used for saving moving average of VecNormalize 
     :param callback_on_new_best: Callback to trigger
         when there is a new best model according to the ``mean_reward``
     :param callback_after_eval: Callback to trigger after every evaluation
@@ -338,6 +340,8 @@ class EvalCallback(EventCallback):
     def __init__(
         self,
         eval_env: Union[gym.Env, VecEnv],
+        train_env: Union[gym.Env, VecEnv],
+        callback_on_eval_end: Optional[BaseCallback] = None,
         callback_on_new_best: Optional[BaseCallback] = None,
         callback_after_eval: Optional[BaseCallback] = None,
         n_eval_episodes: int = 5,
@@ -360,15 +364,18 @@ class EvalCallback(EventCallback):
         self.eval_freq = eval_freq
         self.best_mean_reward = -np.inf
         self.last_mean_reward = -np.inf
+        self.last_success_rate = -np.inf
         self.deterministic = deterministic
         self.render = render
         self.warn = warn
+        self.callback_on_eval_end = callback_on_eval_end
 
         # Convert to VecEnv for consistency
         if not isinstance(eval_env, VecEnv):
             eval_env = DummyVecEnv([lambda: eval_env])
 
         self.eval_env = eval_env
+        self.train_env = train_env
         self.best_model_save_path = best_model_save_path
         # Logs will be written in ``evaluations.npz``
         if log_path is not None:
@@ -478,6 +485,7 @@ class EvalCallback(EventCallback):
                 if self.verbose >= 1:
                     print(f"Success rate: {100 * success_rate:.2f}%")
                 self.logger.record("eval/success_rate", success_rate)
+                self.last_success_rate = success_rate
 
             # Dump log so the evaluation results are printed with the correct timestep
             self.logger.record("time/total_timesteps", self.num_timesteps, exclude="tensorboard")
@@ -488,10 +496,16 @@ class EvalCallback(EventCallback):
                     print("New best mean reward!")
                 if self.best_model_save_path is not None:
                     self.model.save(os.path.join(self.best_model_save_path, "best_model"))
+                    if isinstance(self.train_env, VecNormalize):
+                        self.train_env.save(
+                            os.path.join(self.best_model_save_path, "vec_normalize.pkl"))
                 self.best_mean_reward = mean_reward
                 # Trigger callback on new best model, if needed
                 if self.callback_on_new_best is not None:
                     continue_training = self.callback_on_new_best.on_step()
+
+            if self.callback_on_eval_end is not None:
+                self.callback_on_eval_end._on_step(self)
 
             # Trigger callback after every evaluation, if needed
             if self.callback is not None:
@@ -516,25 +530,53 @@ class StopTrainingOnRewardThreshold(BaseCallback):
 
     It must be used with the ``EvalCallback``.
 
-    :param reward_threshold:  Minimum expected reward per episode
-        to stop training.
-    :param verbose: Verbosity level: 0 for no output, 1 for indicating when training ended because episodic reward
-        threshold reached
+    :param threshold_type: Which threshold type to consider for
+        stoppage criteria (rew or succ)
+    :param threshold:  Minimum expected reward per episode
+    :param verbose:
     """
 
-    def __init__(self, reward_threshold: float, verbose: int = 0):
+    def __init__(self, treshhold_type: str="rew", threshold: float=14.5, verbose: int = 0):
         super().__init__(verbose=verbose)
-        self.reward_threshold = reward_threshold
+        #self.reward_threshold = reward_threshold
+        self.threshold_type = treshhold_type
+        assert self.threshold_type == "rew" or self.threshold_type == "succ", "Threshold type must be 'rew' or 'succ'!"
+
+        if self.threshold_type == "rew":
+            assert threshold > 0, "Reward threshold must be positive"
+        else:
+            assert threshold >= 0.0 and threshold <= 1.0, "Success threshold must be within 0 to 1"
+        self.threshold = threshold
 
     def _on_step(self) -> bool:
         assert self.parent is not None, "``StopTrainingOnMinimumReward`` callback must be used " "with an ``EvalCallback``"
         # Convert np.bool_ to bool, otherwise callback() is False won't work
-        continue_training = bool(self.parent.best_mean_reward < self.reward_threshold)
-        if self.verbose >= 1 and not continue_training:
-            print(
-                f"Stopping training because the mean reward {self.parent.best_mean_reward:.2f} "
-                f" is above the threshold {self.reward_threshold}"
-            )
+        #continue_training = bool(self.parent.best_mean_reward < self.reward_threshold)
+        if rospy.get_param("/task_mode") != "staged":
+            if self.threshold_type == "rew":
+                continue_training = bool(self.parent.best_mean_reward < self.threshold)
+            else:
+                continue_training = bool(self.parent.last_success_rate < self.threshold)
+        else:
+            if self.threshold_type == "rew":
+                continue_training = not bool(
+                    self.parent.best_mean_reward >= self.threshold and
+                    rospy.get_param("/last_stage_reached"))
+            else:
+                continue_training = not bool(
+                    self.parent.last_success_rate >= self.threshold and
+                    rospy.get_param("/last_stage_reached"))
+        if self.verbose > 0 and not continue_training:
+            if self.threshold_type == "rew":
+                print(
+                    f"Stopping training because the mean reward {self.parent.best_mean_reward:.2f} "
+                    f" is above the threshold {self.threshold}"
+                )
+            else:
+                print(
+                    f"Stopping training because the success rate {self.parent.last_success_rate:.2f} "
+                    f" is above the threshold {self.threshold}"
+                )
         return continue_training
 
 
