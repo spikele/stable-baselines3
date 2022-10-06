@@ -329,6 +329,7 @@ class EvalCallback(EventCallback):
         will be saved. It will be updated at each evaluation.
     :param best_model_save_path: Path to a folder where the best model
         according to performance on the eval env will be saved.
+    :param save_replay_buffer: Whether to also save the replay buffer when there is a new best model. Will only work with algorithms that use a replay buffer.
     :param deterministic: Whether the evaluation should
         use a stochastic or deterministic actions.
     :param render: Whether to render or not the environment during evaluation
@@ -348,6 +349,7 @@ class EvalCallback(EventCallback):
         eval_freq: int = 10000,
         log_path: Optional[str] = None,
         best_model_save_path: Optional[str] = None,
+        save_replay_buffer: bool = False,
         deterministic: bool = True,
         render: bool = False,
         verbose: int = 1,
@@ -377,6 +379,7 @@ class EvalCallback(EventCallback):
         self.eval_env = eval_env
         self.train_env = train_env
         self.best_model_save_path = best_model_save_path
+        self.save_replay_buffer = save_replay_buffer
         # Logs will be written in ``evaluations.npz``
         if log_path is not None:
             log_path = os.path.join(log_path, "evaluations")
@@ -499,6 +502,8 @@ class EvalCallback(EventCallback):
                     if isinstance(self.train_env, VecNormalize):
                         self.train_env.save(
                             os.path.join(self.best_model_save_path, "vec_normalize.pkl"))
+                    if self.save_replay_buffer and (self.model.replay_buffer is not None):
+                        self.model.save_replay_buffer(os.path.join(self.best_model_save_path, "replay_buffer"))
                 self.best_mean_reward = mean_reward
                 # Trigger callback on new best model, if needed
                 if self.callback_on_new_best is not None:
