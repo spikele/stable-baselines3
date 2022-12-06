@@ -502,7 +502,7 @@ class EvalCallback(EventCallback):
                     if isinstance(self.train_env, VecNormalize):
                         self.train_env.save(
                             os.path.join(self.best_model_save_path, "vec_normalize.pkl"))
-                    if self.save_replay_buffer and (self.model.replay_buffer is not None):
+                    if self.save_replay_buffer and (hasattr(self.model, replay_buffer)):
                         self.model.save_replay_buffer(os.path.join(self.best_model_save_path, "replay_buffer"))
                 self.best_mean_reward = mean_reward
                 # Trigger callback on new best model, if needed
